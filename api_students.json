@@ -1,0 +1,51 @@
+﻿{
+    "students":  [
+                     {
+                         "roll_number":  "24K91A6790",
+                         "name":  "Kartikey",
+                         "attendance_percent":  "ERROR",
+                         "last_updated":  "2026-02-06 15:41:35"
+                     },
+                     {
+                         "roll_number":  "24K91A6781",
+                         "name":  "Hansika",
+                         "attendance_percent":  "ERROR",
+                         "last_updated":  "2026-02-06 15:41:35"
+                     },
+                     {
+                         "roll_number":  "24K91A6768",
+                         "name":  "Hanisha",
+                         "attendance_percent":  "ERROR",
+                         "last_updated":  "2026-02-06 15:41:35"
+                     },
+                     {
+                         "roll_number":  "24K91A05B7",
+                         "name":  "Srikanth",
+                         "attendance_percent":  "ERROR",
+                         "last_updated":  "2026-02-06 15:41:35"
+                     },
+                     {
+                         "roll_number":  "24K91A0576",
+                         "name":  "Dheeraj",
+                         "attendance_percent":  "ERROR",
+                         "last_updated":  "2026-02-06 15:41:35"
+                     },
+                     {
+                         "roll_number":  "24K91A05C2",
+                         "name":  "Mahathi",
+                         "attendance_percent":  "ERROR",
+                         "last_updated":  "2026-02-06 15:41:35"
+                     },
+                     {
+                         "roll_number":  "24K91A05W8",
+                         "name":  "Praneeth",
+                         "attendance_percent":  "ERROR",
+                         "last_updated":  "2026-02-06 15:41:35"
+                     }
+                 ],
+    "status":  {
+                   "is_running":  false,
+                   "last_run":  null,
+                   "message":  ""
+               }
+}

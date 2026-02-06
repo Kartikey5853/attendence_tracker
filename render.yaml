@@ -1,0 +1,10 @@
+services:
+  - type: web
+    name: tkrcet-attendance-backend
+    env: docker
+    plan: free
+    region: frankfurt
+    dockerfilePath: backend/Dockerfile
+    buildContext: backend
+    healthCheckPath: /api/status
+    autoDeploy: true
