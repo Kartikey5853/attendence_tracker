@@ -2,6 +2,7 @@ from selenium import webdriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
+from selenium.webdriver.chrome.service import Service as ChromeService
 from typing import List, Dict, Optional
 import os
 import threading
@@ -28,13 +29,15 @@ def create_driver() -> webdriver.Chrome:
     options.add_argument("--disable-gpu")
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
+    options.add_argument("--disable-software-rasterizer")
     options.add_argument("--window-size=1366,768")
     options.add_argument("--disable-extensions")
     options.add_argument("--disable-infobars")
     options.add_argument("--ignore-certificate-errors")
     options.add_argument("--ignore-ssl-errors")
+    options.add_argument("--remote-debugging-port=9222")
 
-    # Disable images and fonts to speed up
+    # Speed: disable images/fonts
     prefs = {
         "profile.managed_default_content_settings.images": 2,
         "profile.managed_default_content_settings.fonts": 2,
@@ -46,10 +49,24 @@ def create_driver() -> webdriver.Chrome:
     if chrome_bin:
         options.binary_location = chrome_bin
 
-    # Faster page load strategy (Selenium 4 way)
     options.page_load_strategy = "eager"
 
-    return webdriver.Chrome(options=options)
+    # Use Selenium 4 manager or provided CHROMEDRIVER
+    driver_path = os.environ.get("CHROMEDRIVER")
+    service = ChromeService(executable_path=driver_path) if driver_path else ChromeService()
+    # Verbose logs to help diagnose
+    service.log_output = True
+
+    try:
+        return webdriver.Chrome(service=service, options=options)
+    except Exception:
+        # Retry once after short delay
+        try:
+            import time
+            time.sleep(1)
+            return webdriver.Chrome(service=service, options=options)
+        except Exception as e:
+            raise e
 
 
 def fetch_with_driver(driver: webdriver.Chrome, roll: str) -> Dict:
