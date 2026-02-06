@@ -19,7 +19,8 @@ ENV CHROME_BIN=/usr/bin/google-chrome
 ENV CHROMEDRIVER=/usr/local/bin/chromedriver
 
 WORKDIR /app
-COPY backend/ /app/
+# Dockerfile is inside backend/, so copy backend contents
+COPY . /app/
 RUN pip install --no-cache-dir -r requirements.txt
 
 EXPOSE 8000
