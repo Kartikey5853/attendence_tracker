@@ -19,7 +19,7 @@ RUN apt-get update && apt-get install -y \
 ENV CHROME_BIN=/usr/bin/google-chrome
 
 WORKDIR /app
-COPY backend/ /app/
+COPY . /app/
 RUN pip install --no-cache-dir -r requirements.txt
 
 EXPOSE 8000
