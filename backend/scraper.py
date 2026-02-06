@@ -1,12 +1,34 @@
-import os
-from typing import List, Dict, Optional
-import time
+"""
+HTTP-based attendance scraper for TKRCET portal.
+Uses requests + BeautifulSoup (no Selenium/Chrome needed).
+
+Flow per student:
+  1. GET  index.php              — load login page (get session cookie)
+  2. POST index.php              — submit credentials (username=roll, password=roll, login="")
+     Server responds with JS redirect: document.location = 'MainFrameset.php'
+  3. GET  MainFrameset.php       — follow the JS redirect (validates session)
+  4. GET  StudentInformationForStudent.php — the attendance page (loaded in "main" frame)
+  5. Parse the last <strong> in the table after "Student Attendance Report" <h5>
+"""
+
 import re
+import time
+import warnings
+from typing import Dict, List, Optional
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import requests
 from bs4 import BeautifulSoup
+from urllib3.exceptions import InsecureRequestWarning
 
-LOGIN_URL = "https://103.171.190.44/TKRCET/index.php"
+# Suppress SSL warnings (the college portal uses a self-signed cert)
+warnings.simplefilter("ignore", InsecureRequestWarning)
+
+BASE_URL = "https://103.171.190.44/TKRCET"
+LOGIN_URL = f"{BASE_URL}/index.php"
+FRAMESET_URL = f"{BASE_URL}/MainFrameset.php"
+ATTENDANCE_URL = f"{BASE_URL}/StudentInformationForStudent.php"
+
 DEFAULT_STUDENTS: List[Dict] = [
     {"roll_number": "24K91A6790", "name": "Kartikey"},
     {"roll_number": "24K91A6781", "name": "Hansika"},
@@ -18,166 +40,119 @@ DEFAULT_STUDENTS: List[Dict] = [
 ]
 
 COMMON_HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0 Safari/537.36",
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0 Safari/537.36"
+    ),
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
     "Accept-Language": "en-US,en;q=0.9",
-    "Connection": "keep-alive",
-    "Referer": LOGIN_URL,
 }
 
+TIMEOUT = 20
 
-def login_and_get_session(roll: str) -> Optional[requests.Session]:
-    s = requests.Session()
-    s.headers.update(COMMON_HEADERS)
+
+def _fetch_one(roll: str) -> Dict:
+    """Scrape attendance percentage for a single roll number."""
+    session = requests.Session()
+    session.headers.update(COMMON_HEADERS)
 
     try:
-        # Initial GET
-        resp = s.get(LOGIN_URL, timeout=15, verify=False)
-        resp.raise_for_status()
+        # Step 1: GET login page (sets PHPSESSID cookie)
+        session.get(LOGIN_URL, timeout=TIMEOUT, verify=False)
 
-        # Parse CSRF if present
-        soup = BeautifulSoup(resp.text, "html.parser")
-        csrf_token = None
-        token_el = soup.find("input", {"name": "csrf_token"})
-        if token_el and token_el.get("value"):
-            csrf_token = token_el["value"]
+        # Step 2: POST login
+        # The submit button has name="login" — the server requires it
+        payload = {"username": roll, "password": roll, "login": ""}
+        post_resp = session.post(
+            LOGIN_URL, data=payload, timeout=TIMEOUT, verify=False, allow_redirects=True
+        )
 
-        payload = {
-            "username": roll,
-            "password": roll,
-        }
-        if csrf_token:
-            payload["csrf_token"] = csrf_token
+        # Verify login succeeded: response should start with JS redirect to MainFrameset.php
+        if "MainFrameset.php" not in post_resp.text[:200]:
+            return {"roll_number": roll, "attendance_percent": None, "error": "login failed"}
 
-        post_resp = s.post(LOGIN_URL, data=payload, timeout=20, verify=False)
-        post_resp.raise_for_status()
+        # Step 3: Follow JS redirect — GET the frameset page (validates session)
+        session.get(FRAMESET_URL, timeout=TIMEOUT, verify=False)
 
-        # If post redirects to index or contains frames, consider login success
-        if "frame" not in post_resp.text.lower():
-            # Some portals redirect; follow landing page
-            landing = s.get("https://103.171.190.44/TKRCET/index.php", timeout=15, verify=False)
-            if landing.status_code != 200:
-                return None
-            if "frame" not in landing.text.lower():
-                # Still might be a dashboard; proceed anyway
-                pass
-
-        return s
-    except Exception:
-        return None
-
-
-def discover_attendance_url(session: requests.Session) -> Optional[str]:
-    """After login, load the main menu frame and find the attendance link href."""
-    try:
-        # Load the frameset or dashboard
-        resp = session.get("https://103.171.190.44/TKRCET/index.php", timeout=15, verify=False)
-        resp.raise_for_status()
-        soup = BeautifulSoup(resp.text, "html.parser")
-
-        # Find frame src for menu (first frame usually)
-        menu_frame = soup.find("frame")
-        menu_src = menu_frame.get("src") if menu_frame else None
-        if not menu_src:
-            # Try frameset tag
-            frames = soup.find_all("frame")
-            if frames:
-                menu_src = frames[0].get("src")
-        if not menu_src:
-            return None
-
-        # Fetch the menu frame content
-        menu_resp = session.get(requests.compat.urljoin(LOGIN_URL, menu_src), timeout=15, verify=False)
-        menu_resp.raise_for_status()
-        menu_soup = BeautifulSoup(menu_resp.text, "html.parser")
-
-        # Find link with text containing 'Attendance' or exact anchor structure used earlier
-        link = None
-        # Try by text
-        for a in menu_soup.find_all("a"):
-            txt = a.get_text(strip=True).lower()
-            if "attendance" in txt:
-                link = a
-                break
-        if not link:
-            # Try precise xpath-original path fallback by navigating tables
-            link = menu_soup.find("a", string=lambda t: t and "attendance" in t.lower())
-        if not link:
-            return None
-
-        href = link.get("href")
-        if not href:
-            return None
-
-        return requests.compat.urljoin(LOGIN_URL, href)
-    except Exception:
-        return None
-
-
-def parse_attendance_percentage(html: str) -> Optional[str]:
-    soup = BeautifulSoup(html, "html.parser")
-    percentage_text = None
-
-    # Look near heading
-    heading = soup.find(lambda tag: tag.name in ["h5", "h4", "h3"] and "Student Attendance Report" in tag.get_text(strip=True))
-    if heading:
-        table = heading.find_next("table")
-        if table:
-            strongs = table.select("tbody tr td strong")
-            for st in reversed(strongs):
-                txt = st.get_text(strip=True)
-                if re.search(r"\d+\.\d+%|\d+%", txt):
-                    percentage_text = txt
-                    break
-    if not percentage_text:
-        # Generic search
-        m = re.search(r"(\d{1,3}\.\d{1,2}%|\d{1,3}%)", soup.get_text(" ", strip=True))
-        if m:
-            percentage_text = m.group(1)
-
-    return percentage_text
-
-
-def fetch_attendance_for_roll_http(session: requests.Session, roll: str) -> Dict:
-    try:
-        att_url = discover_attendance_url(session)
-        if not att_url:
-            return {"roll_number": roll, "attendance_percent": "ERROR", "error": "attendance url not found"}
-
-        # Load attendance page
-        att_resp = session.get(att_url, timeout=20, verify=False)
+        # Step 4: GET the attendance page directly
+        att_resp = session.get(ATTENDANCE_URL, timeout=TIMEOUT, verify=False)
         att_resp.raise_for_status()
 
-        percentage_text = parse_attendance_percentage(att_resp.text)
-        attendance = percentage_text or "ERROR"
-        return {"roll_number": roll, "attendance_percent": attendance, "error": None if percentage_text else "not found"}
+        # Step 5: Parse percentage
+        pct = _parse_percentage(att_resp.text)
+        if pct:
+            return {"roll_number": roll, "attendance_percent": pct, "error": None}
+        else:
+            return {"roll_number": roll, "attendance_percent": None, "error": "percentage not found in page"}
+
+    except requests.RequestException as e:
+        return {"roll_number": roll, "attendance_percent": None, "error": f"request error: {e}"}
     except Exception as e:
-        return {"roll_number": roll, "attendance_percent": "ERROR", "error": str(e)}
+        return {"roll_number": roll, "attendance_percent": None, "error": str(e)}
 
 
-def fetch_all_attendance(max_workers: int = 6, students: Optional[List[Dict]] = None) -> List[Dict]:
+def _parse_percentage(html: str) -> Optional[str]:
+    """
+    Find the overall attendance percentage in the attendance page HTML.
+    Structure: <h5>Student Attendance Report …</h5> followed by a <table>.
+    The last <strong> in that table holds the percentage (e.g. "64.00%").
+    """
+    soup = BeautifulSoup(html, "html.parser")
+
+    # Find the heading
+    heading = soup.find(
+        lambda tag: tag.name in ("h5", "h4", "h3", "h2")
+        and "attendance" in tag.get_text(strip=True).lower()
+    )
+    if not heading:
+        return None
+
+    # The attendance table is the first <table> after the heading
+    table = heading.find_next("table")
+    if not table:
+        return None
+
+    # Walk <strong> tags in reverse — the last one with a percentage pattern is what we want
+    for strong in reversed(table.find_all("strong")):
+        txt = strong.get_text(strip=True)
+        if re.search(r"\d+\.\d+%", txt):
+            return txt
+
+    # Fallback: search for any percentage pattern in the table text
+    m = re.search(r"(\d{1,3}\.\d{1,2}%)", table.get_text(" ", strip=True))
+    if m:
+        return m.group(1)
+
+    return None
+
+
+def fetch_all_attendance(
+    max_workers: int = 6,
+    students: Optional[List[Dict]] = None,
+) -> List[Dict]:
+    """Fetch attendance for all students, optionally in parallel."""
     students = students or DEFAULT_STUDENTS
     results: List[Dict] = []
 
-    for s in students:
-        roll = s["roll_number"]
-        sess = login_and_get_session(roll)
-        if not sess:
-            results.append({"roll_number": roll, "name": s["name"], "attendance_percent": "ERROR", "error": "login failed"})
-            continue
-        res = fetch_attendance_for_roll_http(sess, roll)
-        results.append({"roll_number": res["roll_number"], "name": s["name"], "attendance_percent": res["attendance_percent"], "error": res.get("error")})
-        time.sleep(0.3)
+    # Use ThreadPoolExecutor for parallel fetching
+    roll_to_name = {s["roll_number"]: s["name"] for s in students}
 
+    with ThreadPoolExecutor(max_workers=max_workers) as pool:
+        futures = {
+            pool.submit(_fetch_one, s["roll_number"]): s["roll_number"]
+            for s in students
+        }
+        for future in as_completed(futures):
+            res = future.result()
+            roll = res["roll_number"]
+            results.append({
+                "roll_number": roll,
+                "name": roll_to_name.get(roll, ""),
+                "attendance_percent": res["attendance_percent"],
+                "error": res.get("error"),
+            })
+
+    # Sort by original order
+    order = {s["roll_number"]: i for i, s in enumerate(students)}
+    results.sort(key=lambda r: order.get(r["roll_number"], 999))
     return results
-
-# Debug helper: fetch raw HTML for a given roll (not exposed via API directly)
-def debug_fetch_raw_html(roll: str) -> Dict:
-    sess = login_and_get_session(roll)
-    if not sess:
-        return {"ok": False, "error": "login failed"}
-    url = discover_attendance_url(sess)
-    if not url:
-        return {"ok": False, "error": "attendance url not found"}
-    r = sess.get(url, timeout=20, verify=False)
-    return {"ok": True, "url": url, "html": r.text[:4000]}
