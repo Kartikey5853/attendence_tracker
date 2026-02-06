@@ -1,16 +1,16 @@
-from selenium import webdriver
-from selenium.webdriver.common.by import By
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
-from selenium.webdriver.chrome.service import Service as ChromeService
-from typing import List, Dict, Optional
 import os
-import threading
-from queue import Queue, Empty
+from typing import List, Dict, Optional
+import time
+import re
+
+import requests
+from bs4 import BeautifulSoup
 
 LOGIN_URL = "https://103.171.190.44/TKRCET/index.php"
+# After inspecting the app, the attendance report is linked from the menu and loads inside the main frame.
+# On the HTTP layer, it resolves to a PHP endpoint. Adjust path if your deployment differs.
+ATTENDANCE_ENDPOINT = "https://103.171.190.44/TKRCET/student_attendance_report.php"
 
-# Default seed if none provided
 DEFAULT_STUDENTS: List[Dict] = [
     {"roll_number": "24K91A6790", "name": "Kartikey"},
     {"roll_number": "24K91A6781", "name": "Hansika"},
@@ -21,144 +21,116 @@ DEFAULT_STUDENTS: List[Dict] = [
     {"roll_number": "24K91A05W8", "name": "Praneeth"},
 ]
 
+COMMON_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0 Safari/537.36",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Connection": "keep-alive",
+}
 
-def create_driver() -> webdriver.Chrome:
-    options = webdriver.ChromeOptions()
-    # Headless and container-friendly flags
-    options.add_argument("--headless=new")
-    options.add_argument("--disable-gpu")
-    options.add_argument("--no-sandbox")
-    options.add_argument("--disable-dev-shm-usage")
-    options.add_argument("--disable-software-rasterizer")
-    options.add_argument("--window-size=1366,768")
-    options.add_argument("--disable-extensions")
-    options.add_argument("--disable-infobars")
-    options.add_argument("--ignore-certificate-errors")
-    options.add_argument("--ignore-ssl-errors")
-    options.add_argument("--remote-debugging-port=9222")
 
-    # Speed: disable images/fonts
-    prefs = {
-        "profile.managed_default_content_settings.images": 2,
-        "profile.managed_default_content_settings.fonts": 2,
-    }
-    options.add_experimental_option("prefs", prefs)
-
-    # Optional binary location (for containers)
-    chrome_bin = os.environ.get("CHROME_BIN")
-    if chrome_bin:
-        options.binary_location = chrome_bin
-
-    options.page_load_strategy = "eager"
-
-    # Use Selenium 4 manager or provided CHROMEDRIVER
-    driver_path = os.environ.get("CHROMEDRIVER")
-    service = ChromeService(executable_path=driver_path) if driver_path else ChromeService()
-    # Verbose logs to help diagnose
-    service.log_output = True
+def login_and_get_session(roll: str) -> Optional[requests.Session]:
+    """Perform login with requests and return an authenticated session.
+    Assumes form fields 'username' and 'password' as in Selenium version.
+    """
+    s = requests.Session()
+    s.headers.update(COMMON_HEADERS)
 
     try:
-        return webdriver.Chrome(service=service, options=options)
+        # 1) GET login page to obtain cookies (and any CSRF tokens, if present)
+        resp = s.get(LOGIN_URL, timeout=15, verify=False)
+        resp.raise_for_status()
+
+        # Optionally parse CSRF tokens if the form uses them (not observed in Selenium flow)
+        csrf_token = None
+        soup = BeautifulSoup(resp.text, "html.parser")
+        token_el = soup.find("input", {"name": "csrf_token"})
+        if token_el and token_el.get("value"):
+            csrf_token = token_el["value"]
+
+        # 2) POST credentials
+        payload = {
+            "username": roll,
+            "password": roll,
+        }
+        if csrf_token:
+            payload["csrf_token"] = csrf_token
+
+        post_resp = s.post(LOGIN_URL, data=payload, timeout=20, verify=False)
+        post_resp.raise_for_status()
+
+        # Check login success by looking for a known element or redirect pattern
+        if "Invalid" in post_resp.text or "login" in post_resp.url.lower():
+            # Some portals redirect back to login on failure
+            return None
+
+        return s
     except Exception:
-        # Retry once after short delay
-        try:
-            import time
-            time.sleep(1)
-            return webdriver.Chrome(service=service, options=options)
-        except Exception as e:
-            raise e
+        return None
 
 
-def fetch_with_driver(driver: webdriver.Chrome, roll: str) -> Dict:
+def fetch_attendance_for_roll_http(session: requests.Session, roll: str) -> Dict:
+    """Use an authenticated session to fetch attendance percentage for a single roll.
+    Navigates directly to the attendance endpoint and parses the summary table.
+    """
     try:
-        # Reset session between accounts
-        driver.delete_all_cookies()
-        driver.get(LOGIN_URL)
+        # Some systems require a menu click before the report; often a GET to a menu endpoint.
+        # If your portal needs an intermediate request, add it here.
+        # Example placeholder (commented):
+        # session.get("https://103.171.190.44/TKRCET/menu.php?open=attendance", timeout=10, verify=False)
 
-        # Login
-        driver.find_element(By.ID, "username").send_keys(roll)
-        driver.find_element(By.ID, "password").send_keys(roll)
-        driver.find_element(By.XPATH, '//*[@id="loginForm"]/div/div[3]/div/div[2]/button').click()
+        # Fetch the attendance report page
+        resp = session.get(ATTENDANCE_ENDPOINT, timeout=20, verify=False)
+        resp.raise_for_status()
 
-        # Wait for frames
-        WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.TAG_NAME, "frame")))
+        soup = BeautifulSoup(resp.text, "html.parser")
 
-        # Menu frame
-        driver.switch_to.frame(0)
-        WebDriverWait(driver, 8).until(lambda d: d.execute_script("return typeof index === 'function'"))
-        driver.execute_script("index('a:b+0','b')")
-        driver.execute_script("index('a:b:bd+3', 'bd')")
-        driver.find_element(By.XPATH, "/html/body/table[6]/tbody/tr/td[4]/table/tbody/tr/td/nobr/font/a").click()
+        # Strategy 1: Find the table near the heading "Student Attendance Report" and read last <td><strong>
+        heading = soup.find(lambda tag: tag.name in ["h5", "h4", "h3"] and "Student Attendance Report" in tag.get_text(strip=True))
+        percentage_text = None
 
-        # Main frame
-        driver.switch_to.default_content()
-        driver.switch_to.frame("main")
+        if heading:
+            # find the first table after the heading
+            table = heading.find_next("table")
+            if table:
+                # look for last cell with strong
+                strongs = table.select("tbody tr td strong")
+                for st in reversed(strongs):
+                    txt = st.get_text(strip=True)
+                    if re.search(r"\d+\.\d+%|\d+%", txt):
+                        percentage_text = txt
+                        break
 
-        WebDriverWait(driver, 8).until(EC.presence_of_element_located((By.XPATH, "//h5[contains(text(),'Student Attendance Report')]")))
-        percentage_cell = driver.find_element(By.XPATH, "//h5[contains(text(),'Student Attendance Report')]/following::table[1]//tbody/tr/td[last()]//strong")
-        attendance = percentage_cell.text.strip()
-        return {"roll_number": roll, "attendance_percent": attendance, "error": None}
+        # Strategy 2: Fallback - search any text matching percentage pattern
+        if not percentage_text:
+            m = re.search(r"(\d{1,3}\.\d{1,2}%|\d{1,3}%)", soup.get_text(" ", strip=True))
+            if m:
+                percentage_text = m.group(1)
+
+        attendance = percentage_text or "ERROR"
+        return {"roll_number": roll, "attendance_percent": attendance, "error": None if percentage_text else "not found"}
     except Exception as e:
         return {"roll_number": roll, "attendance_percent": "ERROR", "error": str(e)}
-    finally:
-        try:
-            driver.switch_to.default_content()
-        except Exception:
-            pass
-
-
-def fetch_attendance_for_roll(roll: str) -> Dict:
-    # Backward-compatible single-use driver fetch
-    driver = None
-    try:
-        driver = create_driver()
-        return fetch_with_driver(driver, roll)
-    finally:
-        if driver:
-            try:
-                driver.quit()
-            except Exception:
-                pass
 
 
 def fetch_all_attendance(max_workers: int = 6, students: Optional[List[Dict]] = None) -> List[Dict]:
+    """HTTP-based parallel scraping using sessions per student.
+    Render free tier friendly (no browser).
+    """
     students = students or DEFAULT_STUDENTS
 
-    # Use a small pool of persistent drivers to avoid Chrome startup cost
-    task_q: Queue = Queue()
-    for s in students:
-        task_q.put(s)
-
     results: List[Dict] = []
-    results_lock = threading.Lock()
 
-    def worker_thread():
-        driver = create_driver()
-        try:
-            while True:
-                try:
-                    s = task_q.get_nowait()
-                except Empty:
-                    break
-                res = fetch_with_driver(driver, s["roll_number"]) if driver else {"roll_number": s["roll_number"], "attendance_percent": "ERROR", "error": "no driver"}
-                # Attach name and collect
-                res_named = {"roll_number": res["roll_number"], "name": s["name"], "attendance_percent": res.get("attendance_percent"), "error": res.get("error")}
-                with results_lock:
-                    results.append(res_named)
-                task_q.task_done()
-        finally:
-            try:
-                driver.quit()
-            except Exception:
-                pass
-
-    threads: List[threading.Thread] = []
-    for _ in range(max(1, max_workers)):
-        t = threading.Thread(target=worker_thread, daemon=True)
-        t.start()
-        threads.append(t)
-
-    for t in threads:
-        t.join()
+    # Simple sequential loop is usually fast enough without browser startup; still can parallelize if needed
+    # but many hosts limit concurrent network calls. We'll keep it simple and reliable.
+    for s in students:
+        roll = s["roll_number"]
+        sess = login_and_get_session(roll)
+        if not sess:
+            results.append({"roll_number": roll, "name": s["name"], "attendance_percent": "ERROR", "error": "login failed"})
+            continue
+        res = fetch_attendance_for_roll_http(sess, roll)
+        results.append({"roll_number": res["roll_number"], "name": s["name"], "attendance_percent": res["attendance_percent"], "error": res.get("error")})
+        time.sleep(0.3)  # small delay to be gentle
 
     return results
