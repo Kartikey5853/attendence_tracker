@@ -1,10 +1,6 @@
-const API_BASE = window.API_BASE || 
-  (location.hostname === 'localhost' 
-    ? 'http://localhost:8000' 
-    : 'https://attendence-tracker-iyi0.onrender.com');
-
+const API_BASE = "https://attendence-tracker-iyi0.onrender.com";
 // Color palette for avatars
-const AVATAR_COLORS = [
+const AVATAR_COLORS = [ 
     "#6366f1", "#8b5cf6", "#ec4899", "#f43f5e", "#f97316", "#0ea5e9"
 ];
 
