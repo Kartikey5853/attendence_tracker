@@ -12,6 +12,7 @@ _STUDENTS: List[Dict] = [
     {"roll_number": "24K91A05B7", "name": "Srikanth"},
     {"roll_number": "24K91A0576", "name": "Dheeraj"},
     {"roll_number": "24K91A05C2", "name": "Mahathi"},
+    {"roll_number": "24K91A05W8", "name": "Praneeth"},
 ]
 
 # In-memory history per roll (non-persistent)
